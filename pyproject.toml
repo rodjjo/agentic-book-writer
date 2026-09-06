@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "book-writer"
+version = "0.1.0"
+description = "A Kivy book-writer client that lets an LLM (with vision + tool calling) author and edit books as rendered Markdown pages, talking to an OpenAI-compatible server over HTTP or a unix domain socket."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Book Writer Team" }]
+keywords = ["kivy", "openai", "agent", "book", "markdown", "gui", "llm"]
+
+dependencies = [
+    "Kivy>=2.3.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+book-writer = "app.__main__:main"
+book-writer-server = "app.fake_server:main"
+
+[project.gui-scripts]
+book-writer-gui = "app.__main__:main"
+
+[tool.setuptools]
+packages = ["app", "app.gui"]
+
+[tool.setuptools.package-data]
+app = ["icons/*.png"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "system: end-to-end tests against the fake OpenAI-compatible server",
+    "gui: tests that need a display (Xvfb) and xdotool",
+]

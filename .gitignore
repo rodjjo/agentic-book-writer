@@ -1,0 +1,44 @@
+# ------------------------------------------------------------------
+# Book Writer — local / generated ignore rules
+# ------------------------------------------------------------------
+
+# Virtual environments
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local artefacts produced by the running app
+temp/
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Recorded sessions / caches
+sessions/
+*.dsn
+
+# Editor
+.idea/
+.vscode/
+*.iml
+
+# Packaging artefacts
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Local X11 / UI scratch produced while developing
+*.xwd
+*.png.txt
