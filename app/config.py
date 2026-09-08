@@ -120,6 +120,7 @@ class Config:
     connection_timeout: float = 30.0
     max_chat_turns: int = 8  # guard against runaway tool loops
     stream: bool = True       # stream assistant tokens and render them live
+    system_prompt: str = ""   # global system instructions for the assistant
 
     # Populated lazily.
     _server_spec: Optional[ServerSpec] = field(default=None, repr=False)

@@ -18,6 +18,7 @@ Bubbles mirror the original design:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -29,10 +30,13 @@ from PIL import Image, ImageDraw, ImageFont
 from .theme import to_rgb
 
 # --------------------------------------------------------------------------
-# Fonts (DejaVu, bundled with virtually every Linux desktop)
+# Fonts (DejaVu, bundled in non_py/fonts or system)
 # --------------------------------------------------------------------------
 
-_FONT_DIR = Path("/usr/share/fonts/truetype/dejavu")
+_BUNDLED_FONT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "non_py", "fonts")
+)
+_FONT_DIR = Path(_BUNDLED_FONT_DIR) if os.path.exists(_BUNDLED_FONT_DIR) else Path("/usr/share/fonts/truetype/dejavu")
 
 _FONT_NAMES = {
     "body": ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf"),

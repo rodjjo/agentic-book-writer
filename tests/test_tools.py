@@ -20,8 +20,9 @@ def ctx(tmp_path):
 def test_registry_has_expected_tools():
     names = {s["function"]["name"] for s in reg.tool_schemas()}
     assert names == {
-        "create_book", "remove_book", "list_books", "list_pages",
-        "read_page", "write_page", "edit_page", "delete_page", "search_in_book",
+        "create_book", "remove_book", "list_books", "get_book_info",
+        "list_chapters", "read_chapter", "write_chapter", "edit_chapter", "delete_chapter",
+        "list_pages", "read_page", "write_page", "edit_page", "delete_page", "search_in_book",
     }
     # required JSON-schema fields OpenAI expects
     for schema in reg.tool_schemas():
@@ -140,3 +141,118 @@ def test_section_helpers():
 def test_format_tool_result():
     assert format_tool_result("x", {"ok": True, "message": "done"}) == "done"
     assert format_tool_result("x", {"ok": True}) == "x succeeded"
+
+
+def test_tools_with_book_id(ctx):
+    tc, _ = ctx
+    create_res = dispatch(tc, reg.CREATE_BOOK, {"name": "UUID Book", "author": "Author"})
+    assert create_res["ok"] is True
+    book_id = create_res["book"]["id"]
+    assert book_id
+
+    # Write page using book_id
+    write_res = dispatch(tc, reg.WRITE_PAGE, {
+        "name": "UUID Book",
+        "book_id": book_id,
+        "page_name": "Chapter 1",
+        "content": "# Ch 1\n\nMagic happens.",
+    })
+    assert write_res["ok"] is True
+    assert write_res["book_id"] == book_id
+
+    # Read page using book_id
+    read_res = dispatch(tc, reg.READ_PAGE, {
+        "name": "UUID Book",
+        "book_id": book_id,
+        "page_name": "Chapter 1",
+    })
+    assert read_res["ok"] is True
+    assert "Magic" in read_res["content"]
+
+    # List pages using book_id
+    list_res = dispatch(tc, reg.LIST_PAGES, {
+        "name": "UUID Book",
+        "book_id": book_id,
+    })
+    assert list_res["ok"] is True
+    assert list_res["book_id"] == book_id
+    assert list_res["pages"] == ["Chapter 1"]
+
+    # Search using book_id
+    search_res = dispatch(tc, reg.SEARCH_IN_BOOK, {
+        "name": "UUID Book",
+        "book_id": book_id,
+        "query": "magic",
+    })
+    assert search_res["ok"] is True
+    assert len(search_res["hits"]) == 1
+
+    # Remove book using book_id
+    remove_res = dispatch(tc, reg.REMOVE_BOOK, {
+        "name": "UUID Book",
+        "book_id": book_id,
+    })
+    assert remove_res["ok"] is True
+
+
+def test_chapter_tools_dispatch(ctx):
+    tc, events = ctx
+    # Create book
+    res = dispatch(tc, reg.CREATE_BOOK, {"name": "SciFi Epic", "author": "Isaac"})
+    book_id = res["book"]["id"]
+
+    # Write chapters passing book_id and chapter_number
+    w1 = dispatch(tc, reg.WRITE_CHAPTER, {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "title": "Prologue",
+        "content": "# Prologue\n\nIn the beginning.",
+    })
+    assert w1["ok"] is True
+    assert w1["chapter_number"] == 1
+
+    w2 = dispatch(tc, reg.WRITE_CHAPTER, {
+        "book_id": book_id,
+        "chapter_number": 2,
+        "title": "First Contact",
+        "content": "# First Contact\n\nThey arrived quietly.",
+    })
+    assert w2["ok"] is True
+
+    # get_book_info
+    info = dispatch(tc, reg.GET_BOOK_INFO, {"book_id": book_id})
+    assert info["ok"] is True
+    assert info["name"] == "SciFi Epic"
+    assert info["chapter_count"] == 2
+    assert [c["title"] for c in info["chapters"]] == ["Prologue", "First Contact"]
+
+    # list_chapters
+    ch_list = dispatch(tc, reg.LIST_CHAPTERS, {"book_id": book_id})
+    assert ch_list["ok"] is True
+    assert len(ch_list["chapters"]) == 2
+
+    # read_chapter
+    r1 = dispatch(tc, reg.READ_CHAPTER, {"book_id": book_id, "chapter_number": 1})
+    assert r1["ok"] is True
+    assert "In the beginning" in r1["content"]
+
+    # edit_chapter (append)
+    e1 = dispatch(tc, reg.EDIT_CHAPTER, {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "operation": "append",
+        "content": "A new dawn broke.",
+    })
+    assert e1["ok"] is True
+    r1_after = dispatch(tc, reg.READ_CHAPTER, {"book_id": book_id, "chapter_number": 1})
+    assert "A new dawn broke." in r1_after["content"]
+
+    # delete_chapter
+    d1 = dispatch(tc, reg.DELETE_CHAPTER, {"book_id": book_id, "chapter_number": 1})
+    assert d1["ok"] is True
+    info_after = dispatch(tc, reg.GET_BOOK_INFO, {"book_id": book_id})
+    assert info_after["chapter_count"] == 1
+    assert info_after["chapters"][0]["title"] == "First Contact"
+    assert info_after["chapters"][0]["chapter_number"] == 1
+
+

@@ -17,9 +17,12 @@ import json
 import socket
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from .config import ServerSpec, Transport
+
+MAX_REDIRECTS = 10
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class TransportError(Exception):
@@ -103,7 +106,7 @@ def _check(response: Response) -> Response:
 class HTTPTransport:
     """HTTP/HTTPS transport using the standard library's ``http.client``."""
 
-    def __init__(self, base_url: str, timeout: float = 30.0):
+    def __init__(self, base_url: str, timeout: float = 30.0, api_key: Optional[str] = None):
         parsed = urlparse(base_url)
         self.scheme = parsed.scheme or "http"
         self.host = parsed.hostname or "localhost"
@@ -111,29 +114,77 @@ class HTTPTransport:
         if self.port is None and self.scheme == "https":
             self.port = 443
         self.timeout = timeout
+        self.api_key = api_key or ""
 
-    def request(self, method: str, path: str, obj: Optional[dict]) -> Response:
+    def _create_connection(self, scheme: str, host: str, port: Optional[int]):
         import ssl as _ssl
 
-        if self.scheme == "https":
-            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
-                self.host, self.port, timeout=self.timeout,
+        if scheme == "https":
+            effective_port = port or 443
+            return http.client.HTTPSConnection(
+                host, effective_port, timeout=self.timeout,
                 context=_ssl.create_default_context(),
             )
-        else:
-            conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        effective_port = port or 80
+        return http.client.HTTPConnection(host, effective_port, timeout=self.timeout)
 
-        body = json.dumps(obj).encode("utf-8") if obj is not None else None
-        headers = {"Content-Type": "application/json"} if body is not None else {}
-        try:
-            conn.request(method, path, body=body, headers=headers)
-            resp = conn.getresponse()
-            data = resp.read()
-            return _check(_parse_json(resp.status, data))
-        except (OSError, http.client.HTTPException) as exc:
-            raise TransportError(str(exc)) from exc
-        finally:
+    def request(self, method: str, path: str, obj: Optional[dict]) -> Response:
+        cur_scheme = self.scheme
+        cur_host = self.host
+        cur_port = self.port
+        cur_path = path if path.startswith("/") else f"/{path}"
+        cur_method = method
+        cur_obj = obj
+
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            conn = self._create_connection(cur_scheme, cur_host, cur_port)
+            body = json.dumps(cur_obj).encode("utf-8") if cur_obj is not None else None
+            headers = {"Content-Type": "application/json"} if body is not None else {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            try:
+                conn.request(cur_method, cur_path, body=body, headers=headers)
+                resp = conn.getresponse()
+                status = resp.status
+                data = resp.read()
+            except (OSError, http.client.HTTPException) as exc:
+                conn.close()
+                raise TransportError(str(exc)) from exc
+
+            if status in REDIRECT_STATUSES:
+                conn.close()
+                if redirect_count >= MAX_REDIRECTS:
+                    raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
+
+                location = resp.getheader("Location")
+                if not location:
+                    raise TransportError(f"redirect status {status} missing Location header")
+
+                port_part = f":{cur_port}" if (cur_port and not ((cur_scheme == "http" and cur_port == 80) or (cur_scheme == "https" and cur_port == 443))) else ""
+                cur_base = f"{cur_scheme}://{cur_host}{port_part}{cur_path}"
+                new_url = urljoin(cur_base, location)
+                parsed = urlparse(new_url)
+                cur_scheme = parsed.scheme or cur_scheme
+                cur_host = parsed.hostname or cur_host
+                cur_port = parsed.port
+                if cur_port is None and cur_scheme == "https":
+                    cur_port = 443
+                elif cur_port is None and cur_scheme == "http":
+                    cur_port = 80
+                cur_path = parsed.path or "/"
+                if parsed.query:
+                    cur_path += f"?{parsed.query}"
+
+                if status == 303:
+                    cur_method = "GET"
+                    cur_obj = None
+                continue
+
             conn.close()
+            return _check(_parse_json(status, data))
+
+        raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
 
     def post_json(self, path: str, obj: dict) -> Response:
         return _check(self.request("POST", path, obj))
@@ -142,92 +193,176 @@ class HTTPTransport:
         return _check(self.request("GET", path, None))
 
     def stream_chat(self, path: str, obj: dict):
-        """POST ``obj`` and yield decoded SSE payloads as they arrive."""
-        import ssl as _ssl
+        """POST ``obj`` and yield decoded SSE payloads as they arrive, following redirects."""
+        cur_scheme = self.scheme
+        cur_host = self.host
+        cur_port = self.port
+        cur_path = path if path.startswith("/") else f"/{path}"
+        cur_method = "POST"
+        cur_obj = obj
 
-        if self.scheme == "https":
-            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
-                self.host, self.port, timeout=self.timeout,
-                context=_ssl.create_default_context())
-        else:
-            conn = http.client.HTTPConnection(self.host, self.port,
-                                              timeout=self.timeout)
-        body = json.dumps(obj).encode("utf-8")
-        headers = {"Content-Type": "application/json",
-                   "Accept": "text/event-stream"}
-        try:
-            conn.request("POST", path, body=body, headers=headers)
-            resp = conn.getresponse()
-            if not 200 <= resp.status < 300:
-                raise TransportError(
-                    f"request failed (HTTP {resp.status}): {resp.read()[:300]!r}")
-            yield from iter_sse_payloads(iter(resp))
-        except (OSError, http.client.HTTPException) as exc:
-            raise TransportError(str(exc)) from exc
-        finally:
-            conn.close()
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            conn = self._create_connection(cur_scheme, cur_host, cur_port)
+            body = json.dumps(cur_obj).encode("utf-8") if cur_obj is not None else None
+            headers = {"Accept": "text/event-stream"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            try:
+                conn.request(cur_method, cur_path, body=body, headers=headers)
+                resp = conn.getresponse()
+            except (OSError, http.client.HTTPException) as exc:
+                conn.close()
+                raise TransportError(str(exc)) from exc
+
+            status = resp.status
+            if status in REDIRECT_STATUSES:
+                try:
+                    resp.read()
+                finally:
+                    conn.close()
+
+                if redirect_count >= MAX_REDIRECTS:
+                    raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
+
+                location = resp.getheader("Location")
+                if not location:
+                    raise TransportError(f"redirect status {status} missing Location header")
+
+                port_part = f":{cur_port}" if (cur_port and not ((cur_scheme == "http" and cur_port == 80) or (cur_scheme == "https" and cur_port == 443))) else ""
+                cur_base = f"{cur_scheme}://{cur_host}{port_part}{cur_path}"
+                new_url = urljoin(cur_base, location)
+                parsed = urlparse(new_url)
+                cur_scheme = parsed.scheme or cur_scheme
+                cur_host = parsed.hostname or cur_host
+                cur_port = parsed.port
+                if cur_port is None and cur_scheme == "https":
+                    cur_port = 443
+                elif cur_port is None and cur_scheme == "http":
+                    cur_port = 80
+                cur_path = parsed.path or "/"
+                if parsed.query:
+                    cur_path += f"?{parsed.query}"
+
+                if status == 303:
+                    cur_method = "GET"
+                    cur_obj = None
+                continue
+
+            if not 200 <= status < 300:
+                body_sample = resp.read()[:300]
+                conn.close()
+                raise TransportError(f"request failed (HTTP {status}): {body_sample!r}")
+
+            try:
+                yield from iter_sse_payloads(iter(resp))
+            finally:
+                conn.close()
+            return
+
+        raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
 
 
 class _UnixHTTPConnection:
     """Minimal HTTP/1.1 client over an AF_UNIX socket (Connection: close)."""
 
-    def __init__(self, socket_path: str, timeout: float = 30.0):
+    def __init__(self, socket_path: str, timeout: float = 30.0, api_key: Optional[str] = None):
         self.socket_path = socket_path
         self.timeout = timeout
+        self.api_key = api_key or ""
         self._sock: Optional[socket.socket] = None
 
     def request(self, method: str, path: str, obj: Optional[dict]) -> Response:
-        body = json.dumps(obj).encode("utf-8") if obj is not None else b""
-        headers = [
-            f"{method} {path} HTTP/1.1",
-            "Host: book-writer",
-            "Content-Type: application/json",
-            f"Content-Length: {len(body)}",
-            "Connection: close",
-        ]
-        request_bytes = ("\r\n".join(headers) + "\r\n\r\n").encode("utf-8") + body
+        cur_method = method
+        cur_path = path
+        cur_obj = obj
 
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.settimeout(self.timeout)
-        try:
-            self._sock.connect(self.socket_path)
-            self._sock.sendall(request_bytes)
-            chunks = []
-            while True:
-                chunk = self._sock.recv(65536)
-                if not chunk:
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            body = json.dumps(cur_obj).encode("utf-8") if cur_obj is not None else b""
+            headers = [
+                f"{cur_method} {cur_path} HTTP/1.1",
+                "Host: book-writer",
+                "Content-Type: application/json",
+                f"Content-Length: {len(body)}",
+                "Connection: close",
+            ]
+            if self.api_key:
+                headers.append(f"Authorization: Bearer {self.api_key}")
+            request_bytes = ("\r\n".join(headers) + "\r\n\r\n").encode("utf-8") + body
+
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.settimeout(self.timeout)
+            try:
+                self._sock.connect(self.socket_path)
+                self._sock.sendall(request_bytes)
+                chunks = []
+                while True:
+                    chunk = self._sock.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            except (OSError, socket.timeout) as exc:
+                raise TransportError(str(exc)) from exc
+            finally:
+                self._sock.close()
+                self._sock = None
+
+            raw = b"".join(chunks)
+            head, _, body_bytes = raw.partition(b"\r\n\r\n")
+            lines = head.decode("utf-8", "replace").split("\r\n")
+            try:
+                status = int(lines[0].split()[1])
+            except (IndexError, ValueError):
+                raise TransportError(f"malformed HTTP response: {raw[:200]!r}")
+
+            if status in REDIRECT_STATUSES:
+                if redirect_count >= MAX_REDIRECTS:
+                    raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
+                loc = None
+                for header in lines[1:]:
+                    if header.lower().startswith("location:"):
+                        loc = header.split(":", 1)[1].strip()
+                        break
+                if not loc:
+                    raise TransportError(f"redirect status {status} missing Location header")
+                cur_path = loc
+                if status == 303:
+                    cur_method = "GET"
+                    cur_obj = None
+                continue
+
+            content_length: Optional[int] = None
+            for header in lines[1:]:
+                if header.lower().startswith("content-length:"):
+                    content_length = int(header.split(":", 1)[1].strip())
                     break
-                chunks.append(chunk)
-        except (OSError, socket.timeout) as exc:
-            raise TransportError(str(exc)) from exc
-        finally:
-            self._sock.close()
-            self._sock = None
+            if content_length is not None and len(body_bytes) >= content_length:
+                body_bytes = body_bytes[:content_length]
+            return _check(_parse_json(status, body_bytes))
 
-        raw = b"".join(chunks)
-        head, _, body_bytes = raw.partition(b"\r\n\r\n")
-        lines = head.decode("utf-8", "replace").split("\r\n")
-        try:
-            status = int(lines[0].split()[1])
-        except (IndexError, ValueError):
-            raise TransportError(f"malformed HTTP response: {raw[:200]!r}")
-        content_length: Optional[int] = None
-        for header in lines[1:]:
-            if header.lower().startswith("content-length:"):
-                content_length = int(header.split(":", 1)[1].strip())
-                break
-        if content_length is not None and len(body_bytes) >= content_length:
-            body_bytes = body_bytes[:content_length]
-        return _check(_parse_json(status, body_bytes))
+        raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
 
 
 class UnixTransport:
     """Send HTTP/1.1 requests over a unix domain socket to the server."""
 
-    def __init__(self, socket_path: str, timeout: float = 30.0):
+    def __init__(self, socket_path: str, timeout: float = 30.0, api_key: Optional[str] = None):
         self.socket_path = socket_path
         self.timeout = timeout
-        self._conn = _UnixHTTPConnection(socket_path, timeout)
+        self._api_key = api_key or ""
+        self._conn = _UnixHTTPConnection(socket_path, timeout, api_key=self._api_key)
+
+    @property
+    def api_key(self) -> str:
+        return self._api_key
+
+    @api_key.setter
+    def api_key(self, value: str) -> None:
+        self._api_key = value or ""
+        if hasattr(self, "_conn") and self._conn is not None:
+            self._conn.api_key = self._api_key
 
     def post_json(self, path: str, obj: dict) -> Response:
         return self._conn.request("POST", path, obj)
@@ -237,45 +372,74 @@ class UnixTransport:
 
     def stream_chat(self, path: str, obj: dict):
         """POST ``obj`` over the socket and yield SSE payloads as they arrive."""
-        body = json.dumps(obj).encode("utf-8")
-        headers = [
-            f"POST {path} HTTP/1.1",
-            "Host: book-writer",
-            "Content-Type: application/json",
-            "Accept: text/event-stream",
-            f"Content-Length: {len(body)}",
-            "Connection: close",
-        ]
-        request_bytes = ("\r\n".join(headers) + "\r\n\r\n").encode() + body
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        try:
-            sock.connect(self.socket_path)
-            sock.sendall(request_bytes)
-            # read the HTTP response head first, then stream the SSE body
-            head = b""
-            while b"\r\n\r\n" not in head:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                head += chunk
-            status = 0
+        cur_method = "POST"
+        cur_path = path
+        cur_obj = obj
+
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            body = json.dumps(cur_obj).encode("utf-8")
+            headers = [
+                f"{cur_method} {cur_path} HTTP/1.1",
+                "Host: book-writer",
+                "Content-Type: application/json",
+                "Accept: text/event-stream",
+                f"Content-Length: {len(body)}",
+                "Connection: close",
+            ]
+            if self._api_key:
+                headers.append(f"Authorization: Bearer {self._api_key}")
+            request_bytes = ("\r\n".join(headers) + "\r\n\r\n").encode() + body
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
             try:
-                status = int(head.split(b"\r\n", 1)[0].split()[1])
-            except (IndexError, ValueError):
-                raise TransportError(f"malformed HTTP response: {head[:200]!r}")
-            if not 200 <= status < 300:
-                raise TransportError(f"request failed (HTTP {status})")
-            buf = head.partition(b"\r\n\r\n")[2]
-            yield from iter_sse_payloads(_socket_chunks(sock, buf))
-        except (OSError, socket.timeout) as exc:
-            raise TransportError(str(exc)) from exc
-        finally:
-            sock.close()
+                sock.connect(self.socket_path)
+                sock.sendall(request_bytes)
+                # read the HTTP response head first, then stream the SSE body
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    head += chunk
+                status = 0
+                try:
+                    status = int(head.split(b"\r\n", 1)[0].split()[1])
+                except (IndexError, ValueError):
+                    raise TransportError(f"malformed HTTP response: {head[:200]!r}")
+
+                if status in REDIRECT_STATUSES:
+                    sock.close()
+                    if redirect_count >= MAX_REDIRECTS:
+                        raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
+                    lines = head.decode("utf-8", "replace").split("\r\n")
+                    loc = None
+                    for header in lines[1:]:
+                        if header.lower().startswith("location:"):
+                            loc = header.split(":", 1)[1].strip()
+                            break
+                    if not loc:
+                        raise TransportError(f"redirect status {status} missing Location header")
+                    cur_path = loc
+                    if status == 303:
+                        cur_method = "GET"
+                        cur_obj = None
+                    continue
+
+                if not 200 <= status < 300:
+                    raise TransportError(f"request failed (HTTP {status})")
+                buf = head.partition(b"\r\n\r\n")[2]
+                yield from iter_sse_payloads(_socket_chunks(sock, buf))
+                return
+            except (OSError, socket.timeout) as exc:
+                raise TransportError(str(exc)) from exc
+            finally:
+                sock.close()
+
+        raise TransportError(f"too many redirections (exceeded {MAX_REDIRECTS})")
 
 
-def make_transport(spec: ServerSpec, timeout: float = 30.0):
+def make_transport(spec: ServerSpec, timeout: float = 30.0, api_key: Optional[str] = None):
     """Create the appropriate transport for a parsed :class:`ServerSpec`."""
     if spec.is_unix:
-        return UnixTransport(spec.socket_path, timeout)
-    return HTTPTransport(f"http://{spec.host}", timeout)
+        return UnixTransport(spec.socket_path, timeout, api_key=api_key)
+    return HTTPTransport(f"http://{spec.host}", timeout, api_key=api_key)

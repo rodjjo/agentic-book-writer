@@ -96,12 +96,12 @@ def test_author_a_full_book(server_address):
                          "with 3 pages about flying kites.")
 
     names = {e.name for e in result.tool_calls}
-    assert "create_book" in names and "write_page" in names
+    assert "create_book" in names and ("write_chapter" in names or "write_page" in names)
     assert result.final_content
 
     book = store.get_book("The Silver Kite")
     assert book is not None
-    assert book.page_count == 3
+    assert book.chapter_count == 3 or book.page_count == 3
 
     page_names = {p.name for p in store.list_pages("The Silver Kite")}
     assert len(page_names) == 3
@@ -110,7 +110,14 @@ def test_author_a_full_book(server_address):
 
     # nothing was persisted server-side: only the client folder holds the book
     assert (book_root / "the-silver-kite").exists()
-    assert len(list((book_root / "the-silver-kite" / "pages").glob("*.md"))) == 3
+    import uuid
+    assert str(uuid.UUID(book.id, version=4)) == book.id
+    ch_dir = (book_root / "the-silver-kite" / "chapters")
+    if not ch_dir.exists():
+        ch_dir = (book_root / "the-silver-kite" / "pages")
+    md_files = sorted(p.name for p in ch_dir.glob("*.md"))
+    assert md_files == [f"{book.id}_{i:04d}.md" for i in range(1, 4)]
+    assert len(md_files) == 3
 
 
 def test_edit_workflow_after_selection(server_address):
@@ -127,7 +134,7 @@ def test_edit_workflow_after_selection(server_address):
     client.set_current_book("Field Notes")
     res = client.send("Add a page about mountains to Field Notes.")
     names = {e.name for e in res.tool_calls}
-    assert "write_page" in names
+    assert ("write_chapter" in names or "write_page" in names)
     assert store.get_book("Field Notes").page_count >= 2
 
     # a later instruction can search inside the selected book: use a real word

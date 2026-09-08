@@ -36,6 +36,8 @@ def build_config(args: argparse.Namespace) -> Config:
         cfg.theme = ConfigTheme(args.theme)
     if args.timeout is not None:
         cfg.connection_timeout = args.timeout
+    if args.system_prompt:
+        cfg.system_prompt = args.system_prompt
     return cfg
 
 
@@ -48,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--theme", choices=list(THEMES), help="Initial colour theme.")
     parser.add_argument("--geometry", help="Initial window size, e.g. '1100x720'.")
     parser.add_argument("--timeout", type=float, help="Connection timeout in seconds.")
+    parser.add_argument("--system-prompt", help="Initial global system prompt for the assistant.")
     parser.add_argument("--autoconnect", action="store_true",
                         help="Automatically connect to the configured server once the "
                              "window is up (used by system tests and demos).")

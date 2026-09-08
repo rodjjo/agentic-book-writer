@@ -53,3 +53,22 @@ def test_config_update_server_address_revalidates():
 def test_config_theme_values():
     assert Theme.LIGHT.value == "light"
     assert Theme.DARK.value == "dark"
+
+
+def test_config_system_prompt():
+    cfg = Config()
+    assert cfg.system_prompt == ""
+    cfg_with_prompt = Config(system_prompt="You are a poet.")
+    assert cfg_with_prompt.system_prompt == "You are a poet."
+    overridden = cfg.with_overrides(system_prompt="New prompt")
+    assert overridden.system_prompt == "New prompt"
+
+
+def test_cli_system_prompt():
+    from app.__main__ import build_config, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--system-prompt", "You are an author."])
+    cfg = build_config(args)
+    assert cfg.system_prompt == "You are an author."
+

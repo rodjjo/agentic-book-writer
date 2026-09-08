@@ -20,6 +20,7 @@ import random
 import re
 import socket
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import urlparse
@@ -139,6 +140,13 @@ def _extract_page_name(text: str) -> str:
     return "Untitled Page"
 
 
+def _extract_chapter_number(text: str, default: Optional[int] = 1) -> Optional[int]:
+    m = re.search(r'(?:chapter|page)\s+(\d+)', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return default
+
+
 def _extract_page_count(text: str, default: int = 6) -> int:
     m = re.search(r'(\d+)\s+(?:pages?|chapters?)', text, re.IGNORECASE)
     if m:
@@ -219,7 +227,8 @@ class BookAgent:
         call = self._choose_tools(text, messages)
         if call:
             return {"tool_calls": call}
-        return {"content": self._chat_answer(text, image)}
+        current_book, current_book_id = self._current_book_from_messages(messages)
+        return {"content": self._chat_answer(text, image, current_book, current_book_id)}
 
     def stream_response(self, body: dict):
         """Yield OpenAI ``chat.completion.chunk`` SSE events for one assistant turn."""
@@ -278,25 +287,31 @@ class BookAgent:
 
     # -- helpers ----------------------------------------------------------
     @staticmethod
-    def _current_book_from_messages(messages: list[dict]) -> str:
-        """Return the "current book" name carried in a system context message.
+    def _current_book_from_messages(messages: list[dict]) -> tuple[str, str]:
+        """Return the (current_book_name, current_book_id) carried in a system context message.
 
         The client sends a system message like:
-          *The user is currently working on the book named "Sea Stories"...*
+          *The user is currently working on the book named "Sea Stories" with ID "..."...*
         This lets tool calls stay tied to the selected book even when the user's phrasing
         ("add a page about the lighthouse") omits the book name entirely.
         """
+        name = ""
+        book_id = ""
         for m in messages:
             if m.get("role") != "system":
                 continue
             text = m.get("content") or ""
-            match = re.search(r'named\s+"(.*?)"', text, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-            quoted = re.search(r'"(.*?)"', text)
-            if quoted:
-                return quoted.group(1).strip()
-        return ""
+            id_match = re.search(r'ID\s+"([^"]+)"', text, re.IGNORECASE) or re.search(r'book_id:\s*"?([a-f0-9\-]{36})"?', text, re.IGNORECASE)
+            if id_match:
+                book_id = id_match.group(1).strip()
+            name_match = re.search(r'named\s+"(.*?)"', text, re.IGNORECASE)
+            if name_match:
+                name = name_match.group(1).strip()
+            elif not name:
+                quoted = re.search(r'"(.*?)"', text)
+                if quoted:
+                    name = quoted.group(1).strip()
+        return name, book_id
 
     @staticmethod
     def _current_turn_tool_results(messages: list[dict]) -> list[dict]:
@@ -331,73 +346,96 @@ class BookAgent:
     def _choose_tools(self, text: str, messages: list[dict]) -> list[dict]:
         low = text.lower()
         calls: list[dict] = []
-        current_book = self._current_book_from_messages(messages)
+        current_book, current_book_id = self._current_book_from_messages(messages)
 
-        def pick_book() -> str:
-            # Page-scoped operations are tied to the selected book unless the user names a
-            # specific one. This keeps the model's calls in the right book even when the
-            # instruction contains an incidental quoted word (e.g. the search query).
+        def pick_book() -> tuple[str, str]:
             explicit = _explicit_book_name(text)
             if explicit:
-                return explicit
-            return current_book if current_book else _extract_book_name(text)
+                if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', explicit, re.I):
+                    return explicit, explicit
+                return explicit, (current_book_id if explicit == current_book else "")
+            name = current_book if current_book else _extract_book_name(text)
+            b_id = current_book_id if name == current_book else ""
+            return name, b_id
 
         # whole-book generation
         if any(k in low for k in ("create a book", "new book", "start a book", "write a book",
                                   "make a book", "begin a book")):
-            name = pick_book()
+            name, book_id = pick_book()
             count = _extract_page_count(text)
-            calls.append(_tool_call(reg.CREATE_BOOK, {"name": name}, len(calls)))
-            for _title, md in generate_book(name, count):
-                calls.append(_tool_call(
-                    reg.WRITE_PAGE, {"name": name, "page_name": _title, "content": md}, len(calls)
-                ))
+            book_id = book_id or str(uuid.uuid4())
+            calls.append(_tool_call(reg.CREATE_BOOK, {"name": name, "book_id": book_id}, len(calls)))
+            for i, (_title, md) in enumerate(generate_book(name, count), start=1):
+                args = {"book_id": book_id, "chapter_number": i, "title": _title, "content": md, "name": name}
+                calls.append(_tool_call(reg.WRITE_CHAPTER, args, len(calls)))
             return calls
 
         if any(k in low for k in ("list books", "what books", "show books", "books available")):
             return [_tool_call(reg.LIST_BOOKS, {}, 0)]
 
-        if any(k in low for k in ("list pages", "pages of", "table of contents", "chapters of")):
-            name = pick_book()
-            return [_tool_call(reg.LIST_PAGES, {"name": name}, 0)]
+        if any(k in low for k in ("get book info", "book info", "info about book", "about book")):
+            name, book_id = pick_book()
+            args = {"book_id": book_id or name, "name": name}
+            return [_tool_call(reg.GET_BOOK_INFO, args, 0)]
 
-        if any(k in low for k in ("read page", "open page", "show page", "view page")):
-            name = pick_book()
-            page = _extract_page_name(text)
-            return [_tool_call(reg.READ_PAGE, {"name": name, "page_name": page}, 0)]
+        if any(k in low for k in ("list chapters", "chapters of", "table of contents", "list pages", "pages of")):
+            name, book_id = pick_book()
+            args = {"book_id": book_id or name, "name": name}
+            return [_tool_call(reg.GET_BOOK_INFO, args, 0)]
 
-        if any(k in low for k in ("delete page", "remove page")):
-            name = pick_book()
-            page = _extract_page_name(text)
-            return [_tool_call(reg.DELETE_PAGE, {"name": name, "page_name": page}, 0)]
+        if any(k in low for k in ("read chapter", "open chapter", "show chapter", "view chapter",
+                                  "read page", "open page", "show page", "view page")):
+            name, book_id = pick_book()
+            ch_num = _extract_chapter_number(text)
+            args = {"book_id": book_id or name, "chapter_number": ch_num, "name": name}
+            return [_tool_call(reg.READ_CHAPTER, args, 0)]
+
+        if any(k in low for k in ("delete chapter", "remove chapter", "delete page", "remove page")):
+            name, book_id = pick_book()
+            ch_num = _extract_chapter_number(text)
+            args = {"book_id": book_id or name, "chapter_number": ch_num, "name": name}
+            return [_tool_call(reg.DELETE_CHAPTER, args, 0)]
 
         if any(k in low for k in ("search", "find ")):
-            name = pick_book()
+            name, book_id = pick_book()
             query = _extract_search_query(text)
-            return [_tool_call(reg.SEARCH_IN_BOOK, {"name": name, "query": query}, 0)]
+            args = {"query": query}
+            if book_id:
+                args["book_id"] = book_id
+            if name:
+                args["name"] = name
+            return [_tool_call(reg.SEARCH_IN_BOOK, args, 0)]
 
         if any(k in low for k in ("remove book", "delete book")):
-            name = pick_book()
-            return [_tool_call(reg.REMOVE_BOOK, {"name": name}, 0)]
+            name, book_id = pick_book()
+            args = {"name": name}
+            if book_id:
+                args["book_id"] = book_id
+            return [_tool_call(reg.REMOVE_BOOK, args, 0)]
 
-        if any(k in low for k in ("write a page", "add a page", "add chapter", "write a chapter",
-                                  "new page", "next page", "page ", "chapter ")):
-            name = pick_book()
+        if any(k in low for k in ("write a chapter", "add a chapter", "add chapter", "write chapter", "new chapter", "next chapter", "chapter ",
+                                  "write a page", "add a page", "new page", "next page", "page ")):
+            name, book_id = pick_book()
+            ch_num = _extract_chapter_number(text, default=None)
             page = _extract_page_name(text)
             _title, md = generate_book(name, 1)[0]
-            # Prefer the requested page title.
+            # Prefer the requested chapter title.
             md = f"# {page}\n\n" + _PARAGRAPH_TEMPLATES[2].format(title=page) + "\n\n" \
                  + _PARAGRAPH_TEMPLATES[3].format(title=page) + "\n\n" + _PARAGRAPH_TEMPLATES[4].format(title=page) + "\n"
-            return [_tool_call(reg.WRITE_PAGE, {"name": name, "page_name": page, "content": md}, 0)]
+            args = {"book_id": book_id or name, "chapter_number": ch_num if ch_num is not None else "next", "title": page, "content": md, "name": name}
+            return [_tool_call(reg.WRITE_CHAPTER, args, 0)]
 
         if any(k in low for k in ("edit", "revise", "change", "improve", "rewrite", "fix",
                                   "make it", "add to", "append")):
-            name = pick_book()
+            name, book_id = pick_book()
+            ch_num = _extract_chapter_number(text)
             page = _extract_page_name(text)
-            return [_tool_call(reg.EDIT_PAGE, {
-                "name": name, "page_name": page, "operation": "append",
+            args = {
+                "book_id": book_id or name, "chapter_number": ch_num, "operation": "append",
                 "additions": [_PARAGRAPH_TEMPLATES[5].format(title=page)],
-            }, 0)]
+                "name": name,
+            }
+            return [_tool_call(reg.EDIT_CHAPTER, args, 0)]
 
         return []  # plain chat
 
@@ -415,7 +453,7 @@ class BookAgent:
                                             "finish_reason": "tool_calls" if "tool_calls" in payload
                                             else "stop"}]}
 
-    def _chat_answer(self, text: str, image: bool) -> str:
+    def _chat_answer(self, text: str, image: bool, current_book: str = "", current_book_id: str = "") -> str:
         if not text.strip():
             return "Hi! I'm your book-writing assistant. Tell me what book you'd like and " \
                    "I'll author it page by page, or ask me to edit and search your books."
@@ -423,6 +461,11 @@ class BookAgent:
         if image:
             note = " _(I can see the image you attached — I'll keep it in mind!)_  "
         lower = text.lower()
+        if any(w in lower for w in ("current book", "which book", "what book", "book id", "uuid", "working on")):
+            if current_book:
+                id_str = f" with ID {current_book_id}" if current_book_id else ""
+                return f"You are currently working on \"{current_book}\"{id_str}."
+            return "No book is currently selected."
         if any(w in lower for w in ("hello", "hi ", "hey", "good morning", "good evening")):
             return f"Hello{note} What shall we write today?"
         if any(w in lower for w in ("thank", "thanks", "cheers")):
@@ -440,6 +483,7 @@ class BookAgent:
         """Summarise the tool results that were just executed into a friendly answer."""
         wrote_pages = 0
         created = None
+        created_id = None
         removed = None
         preview: Optional[str] = None
 
@@ -451,42 +495,49 @@ class BookAgent:
                 continue
             name = m.get("name", "")
             if name == reg.CREATE_BOOK and res.get("ok"):
-                created = res.get("book", {}).get("name")
+                book_data = res.get("book", {})
+                created = book_data.get("name") or res.get("book")
+                created_id = book_data.get("id") or res.get("book_id")
             elif name == reg.REMOVE_BOOK and res.get("ok"):
                 removed = res.get("book")
-            elif name == reg.WRITE_PAGE and res.get("ok"):
+            elif name in (reg.WRITE_CHAPTER, reg.WRITE_PAGE) and res.get("ok"):
                 wrote_pages += 1
                 if preview is None and res.get("content"):
                     preview = res["content"].strip().splitlines()
-            elif name == reg.EDIT_PAGE and res.get("ok"):
+            elif name in (reg.EDIT_CHAPTER, reg.EDIT_PAGE) and res.get("ok"):
                 if preview is None:
-                    preview = [f":pencil: Edited {m.get('name')} → {res.get('message', '')}"]
+                    preview = [f":pencil: Edited chapter → {res.get('message', '')}"]
             elif name == reg.SEARCH_IN_BOOK and res.get("message"):
                 if preview is None:
                     preview = [res["message"]]
             elif name == reg.LIST_BOOKS and res.get("message"):
                 if preview is None:
                     preview = [res["message"]]
-            elif name == reg.LIST_PAGES and res.get("message"):
+            elif name in (reg.GET_BOOK_INFO, reg.LIST_CHAPTERS, reg.LIST_PAGES) and res.get("message"):
                 if preview is None:
                     preview = [res["message"]]
-            elif name == reg.READ_PAGE and res.get("content"):
+            elif name in (reg.READ_CHAPTER, reg.READ_PAGE) and res.get("content"):
                 if preview is None:
                     preview = [f"> {res['content'][:200].strip()}"]
+            elif name in (reg.DELETE_CHAPTER, reg.DELETE_PAGE) and res.get("ok"):
+                if preview is None:
+                    preview = [res.get("message", "Deleted chapter.")]
 
         parts = []
         if created:
-            parts.append(f"Created the book **{created}**.")
+            id_info = f" (ID: {created_id})" if created_id else ""
+            parts.append(f"Created the book **{created}**{id_info}.")
         if wrote_pages:
             line = preview[wrote_pages - 1] if wrote_pages and preview else ""
-            parts.append(f"Wrote {wrote_pages} page(s).")
+            parts.append(f"Wrote {wrote_pages} chapter(s).")
             if preview:
                 first = "\n".join(preview[:1]) if isinstance(preview[0], list) else preview[0]
                 parts.append(f"\n_{first[:280]}_")
         if removed:
             parts.append(f"Removed the book **{removed}**.")
         if created and wrote_pages:
-            parts.append(f"\nYour book **{created}** is ready — open the **Books** tab to "
+            id_info = f" (ID: {created_id})" if created_id else ""
+            parts.append(f"\nYour book **{created}**{id_info} is ready — open the **Books** tab to "
                          "read it. I can keep adding chapters, edit wording, or search "
                          "through the pages whenever you like.")
         if not parts:

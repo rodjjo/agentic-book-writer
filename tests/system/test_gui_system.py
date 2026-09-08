@@ -61,7 +61,7 @@ def _wait_for_book(book_root: Path, name: str, timeout: float = 60.0) -> bool:
     while time.time() < deadline:
         meta = book_root / (name.lower().replace(" ", "-")) / "book.json"
         if meta.exists():
-            pages = list(meta.parent.glob("pages/*.md"))
+            pages = list(meta.parent.glob("chapters/*.md")) or list(meta.parent.glob("pages/*.md"))
             if pages:
                 return True
         time.sleep(0.5)
@@ -114,7 +114,7 @@ def test_gui_types_an_instruction_and_creates_a_book(tmp_path):
         assert created, f"the book was not created on disk under {book_root}"
 
         meta = (book_root / "gui-automation-tales" / "book.json").read_text()
-        pages = list((book_root / "gui-automation-tales" / "pages").glob("*.md"))
+        pages = list((book_root / "gui-automation-tales" / "chapters").glob("*.md")) or list((book_root / "gui-automation-tales" / "pages").glob("*.md"))
         assert len(pages) >= 2, f"expected >=2 pages, got {len(pages)}"
         assert '"GUI Automation Tales"' in meta
     finally:

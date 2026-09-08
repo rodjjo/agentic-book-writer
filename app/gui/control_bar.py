@@ -22,7 +22,7 @@ from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 
 from .colors import rgba
-from .widgets import (FlatButton, app_icon_path, font_file, icon_path)
+from .widgets import (FlatButton, ResponsiveSpinner, app_icon_path, font_file, icon_path)
 
 SLATE = "#1f2937"          # bar background
 SLATE_INPUT = "#111827"    # dark field background
@@ -32,29 +32,30 @@ SLATE_HINT = "#9ca3af"     # muted label text
 class _BarField(TextInput):
     """Dark text input used inside the control bar (flexible width)."""
 
-    def __init__(self, hint: str, **kwargs):
+    def __init__(self, hint: str, password: bool = False, **kwargs):
         kwargs.setdefault("size_hint_min_x", 160.0)
         kwargs.setdefault("font_size", 13)
         super().__init__(
             hint_text=hint,
             multiline=False,
+            password=password,
             size_hint=(1.0, 1.0),
             font_name=font_file(),
             background_color=rgba(SLATE_INPUT),
             foreground_color=(1, 1, 1, 1),
             hint_text_color=rgba(SLATE_HINT),
             cursor_color=rgba("#ffffff"),
-            padding=(10, 0),
+            padding=(10, 8),
             **kwargs,
         )
 
 
 class ControlBar(BoxLayout):
-    """Top bar with connection and book configuration controls (two rows)."""
+    """Top bar with connection and book configuration controls (three rows)."""
 
     def __init__(self, app, **kwargs):
-        super().__init__(orientation="vertical", spacing=4, padding=(8, 4),
-                         size_hint=(1.0, None), height=84)
+        super().__init__(orientation="vertical", spacing=4, padding=(8, 5),
+                         size_hint=(1.0, None), height=126)
         self._app = app
         self._connected = False
 
@@ -66,7 +67,7 @@ class ControlBar(BoxLayout):
 
         # -- row 1: brand + server address + connect ------------------------
         row1 = BoxLayout(orientation="horizontal", spacing=8,
-                         size_hint=(1.0, None), height=40)
+                         size_hint=(1.0, None), height=36)
         logo = KivyImage(source=app_icon_path(), size_hint=(None, None),
                          size=(32, 32))
         logo.pos_hint = {"center_y": 0.5}
@@ -76,7 +77,7 @@ class ControlBar(BoxLayout):
                       size_hint=(None, 1.0), width=140)
         row1.add_widget(title)
 
-        self._server = _BarField("server - e.g. unix:/tmp/book_writer.sock")
+        self._server = _BarField("server - e.g. unix:/tmp/book_writer.sock or http://localhost:8000")
         row1.add_widget(self._server)
 
         self._connect_btn = FlatButton(
@@ -86,27 +87,49 @@ class ControlBar(BoxLayout):
         row1.add_widget(self._connect_btn)
         self.add_widget(row1)
 
-        # -- row 2: model + theme/settings + status -------------------------
+        # -- row 2: API key (aligned directly below server address) ---------
         row2 = BoxLayout(orientation="horizontal", spacing=8,
                          size_hint=(1.0, None), height=36)
-        self._model = Spinner(
+        # Left label matching width of logo (32) + spacing (8) + title (140) = 180
+        api_lbl = Label(text="API Key:", font_name=font_file(bold=True),
+                        font_size=13, color=(1, 1, 1, 1),
+                        size_hint=(None, 1.0), width=180,
+                        halign="right", valign="middle")
+        api_lbl.bind(size=lambda lbl, *_a: setattr(lbl, "text_size", (lbl.width, lbl.height)))
+        row2.add_widget(api_lbl)
+
+        self._api_key = _BarField("API key (optional, in-memory) - e.g. sk-...", password=True)
+        self._api_key.bind(text=lambda _inp, val: self._app.on_api_key_changed(val))
+        row2.add_widget(self._api_key)
+
+        self._toggle_key_btn = FlatButton(
+            text="Show", size=(124, 36),
+            bg_color=rgba("#374151"), fg_color=(1, 1, 1, 1),
+            on_release=lambda *_a: self._toggle_key_visibility())
+        row2.add_widget(self._toggle_key_btn)
+        self.add_widget(row2)
+
+        # -- row 3: model + theme/settings + status -------------------------
+        row3 = BoxLayout(orientation="horizontal", spacing=8,
+                         size_hint=(1.0, None), height=36)
+        self._model = ResponsiveSpinner(
             text="model", values=(), size_hint=(None, 1.0), width=260,
             font_name=font_file(), font_size=13, color=(1, 1, 1, 1),
             background_color=rgba(SLATE_INPUT), background_normal="",
         )
         self._model.bind(text=lambda _sp, value: self._on_model_text(value))
-        row2.add_widget(self._model)
+        row3.add_widget(self._model)
 
         theme_btn = FlatButton(text="Theme", size=(92, 34),
                                bg_color=rgba("#374151"), fg_color=(1, 1, 1, 1),
                                on_release=lambda *_a: self._app.toggle_theme())
-        row2.add_widget(theme_btn)
+        row3.add_widget(theme_btn)
         settings_btn = FlatButton(text="Settings", size=(112, 34),
                                   bg_color=rgba("#374151"), fg_color=(1, 1, 1, 1),
                                   on_release=lambda *_a: self._app.open_settings())
-        row2.add_widget(settings_btn)
+        row3.add_widget(settings_btn)
 
-        row2.add_widget(BoxLayout())  # flexible spacer
+        row3.add_widget(BoxLayout())  # flexible spacer
 
         self._status = Label(text="disconnected", font_name=font_file(bold=True),
                              font_size=12, color=rgba("#f87171"),
@@ -114,17 +137,27 @@ class ControlBar(BoxLayout):
                              halign="right", valign="middle")
         self._status.bind(size=lambda lbl, *_a: setattr(lbl, "text_size",
                                                         (lbl.width, lbl.height)))
-        row2.add_widget(self._status)
-        self.add_widget(row2)
+        row3.add_widget(self._status)
+        self.add_widget(row3)
 
         self.set_server_address(app.cfg.server_address)
 
     # -- events ------------------------------------------------------------
+    def _toggle_key_visibility(self) -> None:
+        self._api_key.password = not self._api_key.password
+        self._toggle_key_btn.text = "Hide" if not self._api_key.password else "Show"
+
     def _on_model_text(self, value: str) -> None:
         if value and value != "model":
             self._app.on_model_selected(value)
 
     # -- updates -----------------------------------------------------------
+    def get_api_key(self) -> str:
+        return self._api_key.text.strip()
+
+    def set_api_key(self, key: str) -> None:
+        self._api_key.text = key
+
     def set_server_address(self, addr: str) -> None:
         self._server.text = addr
 

@@ -139,3 +139,295 @@ def test_logs_ring_and_render():
 def test_log_render_empty():
     out = log_render.render_log([], THEMES["light"].colors(), 800)
     assert out.content_h >= 1
+
+
+def test_render_markdown_no_text_cropping():
+    # Long paragraph that wraps at 760px text width
+    md = ("Once upon a time in a world of books and code, the GUI was taking form. "
+          "Every single line of text flowed gracefully from margin to margin without "
+          "any clipping or truncated sentences whatsoever.")
+    img = markdown_render.render_markdown(md, text_width=760, margin=36)
+    assert img.width >= 760 + 2 * 36
+    lo, hi = _left_right_dark_bounds(img)
+    # Dark text must start after margin and end before right edge
+    assert lo >= 30, f"text starts too far left: {lo}"
+    assert hi < img.width - 20, f"text clipped at right edge: {hi} vs {img.width}"
+
+
+def test_render_markdown_a4_paper_shape_single_line():
+    # Even with a single line of text, the page maintains the A4 paper aspect ratio
+    md = "Single line of text."
+    img = markdown_render.render_markdown(md, text_width=760, margin=36)
+    assert img.width >= 760 + 2 * 36
+    ratio = img.height / img.width
+    # A4 ratio: 297 / 210 ≈ 1.4142
+    assert 1.41 <= ratio <= 1.42
+    expected_min_height = int(round(img.width * (297.0 / 210.0)))
+    assert img.height >= expected_min_height
+
+
+def test_markdown_inline_parser_nesting():
+    # Test nested bold, italic, code, strikethrough, mark, underline, links
+    text = "Plain **bold with *italic* and `code`** and ~~**bold strike**~~ and ==highlighted== and ++underlined++ and [**bold link**](https://example.com)."
+    spans = markdown_render.parse_inline(text)
+    styles = [s.styles for s in spans]
+    # Check that nested styles are captured accurately
+    assert () in styles  # plain text
+    assert ("bold",) in styles  # bold
+    assert ("bold", "italic") in styles  # nested bold-italic
+    assert ("bold", "code") in styles  # nested code in bold
+    assert ("bold", "strikethrough") in styles or ("strikethrough", "bold") in styles
+    assert any("mark" in s.styles for s in spans)
+    assert any("underline" in s.styles for s in spans)
+    assert any("link" in s.styles and "bold" in s.styles and s.link_url == "https://example.com" for s in spans)
+
+
+def test_markdown_html_tags_inline():
+    text = "<b>bold</b> <i>italic</i> <del>strike</del> <mark>mark</mark> <u>underline</u> <code>code</code> <kbd>Ctrl+C</kbd> <sup>2</sup> <sub>i</sub>"
+    spans = markdown_render.parse_inline(text)
+    styles_by_text = {s.text: s.styles for s in spans}
+    assert "bold" in styles_by_text["bold"]
+    assert "italic" in styles_by_text["italic"]
+    assert "strikethrough" in styles_by_text["strike"]
+    assert "mark" in styles_by_text["mark"]
+    assert "underline" in styles_by_text["underline"]
+    assert "code" in styles_by_text["code"]
+    assert "kbd" in styles_by_text["Ctrl+C"]
+    assert "sup" in styles_by_text["2"]
+    assert "sub" in styles_by_text["i"]
+
+
+def test_markdown_escaped_characters():
+    text = r"\*not italic\* and \_not italic\_ and \`not code\` and \[not link\]"
+    spans = markdown_render.parse_inline(text)
+    combined = "".join(s.text for s in spans)
+    assert "*not italic*" in combined
+    assert "_not italic_" in combined
+    assert "`not code`" in combined
+    assert "[not link]" in combined
+    assert all(s.styles == () for s in spans)
+
+
+def test_markdown_smart_typography():
+    text = "A -- B --- C ... (c) (r) (tm) -> <- != <="
+    spans = markdown_render.parse_inline(text)
+    combined = "".join(s.text for s in spans)
+    assert "–" in combined  # en-dash
+    assert "—" in combined  # em-dash
+    assert "…" in combined  # ellipsis
+    assert "©" in combined
+    assert "®" in combined
+    assert "™" in combined
+    assert "→" in combined
+    assert "←" in combined
+    assert "≠" in combined
+    assert "≤" in combined
+
+
+def test_render_markdown_task_list_checkboxes():
+    md = "- [ ] Unfinished task\n- [x] Completed task\n1. [ ] Numbered task\n1. [x] Numbered done"
+    img = markdown_render.render_markdown(md, text_width=600, margin=30)
+    assert img.mode == "RGBA"
+    assert img.width >= 660
+    assert img.height > 100
+
+
+def test_render_markdown_alerts():
+    md = (
+        "> [!NOTE]\n"
+        "> This is a note with **bold** text and `code`.\n\n"
+        "> [!TIP]\n"
+        "> Here is an actionable tip.\n\n"
+        "> [!WARNING]\n"
+        "> Proceed with caution.\n\n"
+        "> [!IMPORTANT]\n"
+        "> Key requirement.\n\n"
+        "> [!CAUTION]\n"
+        "> Dangerous operation.\n"
+    )
+    img = markdown_render.render_markdown(md, text_width=600, margin=30)
+    assert img.mode == "RGBA"
+    assert img.height > 200
+
+
+def test_render_markdown_syntax_highlighted_code():
+    md = (
+        "```python\n"
+        "# Calculate fibonacci\n"
+        "def fib(n: int) -> int:\n"
+        "    if n <= 1:\n"
+        "        return n\n"
+        "    return fib(n - 1) + fib(n - 2)\n"
+        "```\n\n"
+        "```javascript\n"
+        "// A JS function\n"
+        "function greet(name) {\n"
+        "    const message = `Hello, ${name}!`;\n"
+        "    console.log(message);\n"
+        "    return 42;\n"
+        "}\n"
+        "```\n"
+    )
+    img = markdown_render.render_markdown(md, text_width=700, margin=30)
+    assert img.mode == "RGBA"
+    assert img.height > 200
+
+
+def test_render_markdown_math_and_deflist():
+    md = (
+        "$$\n"
+        "E = mc^2\n"
+        "\\int_{0}^{\\infty} e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}\n"
+        "$$\n\n"
+        "Euler's formula: $e^{i\\pi} + 1 = 0$\n\n"
+        "Python\n"
+        ": A high-level, interpreted programming language.\n\n"
+        "Pillow\n"
+        ": The friendly Python Imaging Library fork.\n"
+    )
+    img = markdown_render.render_markdown(md, text_width=700, margin=30)
+    assert img.mode == "RGBA"
+    assert img.height > 200
+
+
+def test_render_markdown_rich_table():
+    md = (
+        "| Feature | Status | Notes |\n"
+        "| :--- | :---: | ---: |\n"
+        "| **Bold** & *Italic* | `Supported` | ~~Deprecated~~ |\n"
+        "| [Link](https://example.com) | ==Active== | 100% |\n"
+        "| `Inline Code` | `Done` | Sub<sub>2</sub> and Sup<sup>2</sup> |\n"
+    )
+    img = markdown_render.render_markdown(md, text_width=700, margin=30)
+    assert img.mode == "RGBA"
+    assert img.height > 150
+
+
+def test_bundled_fonts_location():
+    import os
+    from pathlib import Path
+    from app import chat_render, markdown_render
+    from app.gui import widgets
+
+    # Ensure dynamic path to non_py/fonts is used
+    non_py_fonts = Path(markdown_render._NON_PY_FONTS_DIR)
+    assert non_py_fonts.exists()
+    assert (non_py_fonts / "DejaVuSerif.ttf").exists()
+    assert (non_py_fonts / "DejaVuSans.ttf").exists()
+    assert (non_py_fonts / "DejaVuSansMono.ttf").exists()
+
+    # Verify markdown_render candidate priority
+    assert markdown_render._FONT_CANDIDATES[0] == non_py_fonts
+
+    # Verify chat_render uses bundled fonts directory
+    assert chat_render._FONT_DIR == non_py_fonts
+
+    # Verify widgets uses bundled fonts directory
+    assert widgets._DEJAVU_DIR == non_py_fonts
+    assert "non_py/fonts" in widgets.font_file()
+
+
+def test_render_markdown_pages_explicit_break():
+    md = (
+        "# Page 1 Title\n\nContent for the first page.\n\n"
+        "<!-- pagebreak -->\n\n"
+        "# Page 2 Title\n\nContent for the second page.\n\n"
+        "\\pagebreak\n\n"
+        "# Page 3 Title\n\nContent for the third page."
+    )
+    pages = markdown_render.render_markdown_pages(md, text_width=760, margin=36)
+    assert len(pages) == 3
+    for p in pages:
+        assert p.mode == "RGBA"
+        assert p.width == 760 + 2 * 36
+        ratio = p.height / p.width
+        assert 1.41 <= ratio <= 1.42
+
+
+def test_render_markdown_pages_height_overflow():
+    # Long content that exceeds a single A4 page height
+    long_para = "This is a substantial paragraph of text written for our novel. " * 30
+    paragraphs = [f"## Section {i}\n\n{long_para}\n" for i in range(1, 10)]
+    md = "\n".join(paragraphs)
+
+    pages = markdown_render.render_markdown_pages(md, text_width=760, margin=36)
+    assert len(pages) >= 2, f"expected at least 2 pages from overflow, got {len(pages)}"
+    for p in pages:
+        ratio = p.height / p.width
+        assert 1.41 <= ratio <= 1.42
+
+
+def test_render_markdown_list_no_cumulative_indentation():
+    md = "- First item\n- Second item\n- Third item\n- Fourth item\n- Fifth item"
+    blocks = markdown_render.parse_blocks(md)
+    assert len(blocks) == 1
+    assert blocks[0].type == "ul"
+    items = blocks[0].data["items"]
+    assert len(items) == 5
+    for it in items:
+        assert it["children"] == []
+
+    fonts = markdown_render.FontSet.system()
+    palette = markdown_render.DEFAULT_PALETTE
+    renderer = markdown_render.Renderer(fonts, palette, max_text_width=700, margin=30)
+    rendered_items, _, _ = renderer.render(blocks)
+    markers = [prim for y, prim in rendered_items if prim[0] == "list_marker"]
+    assert len(markers) == 5
+    x_positions = [m[1] for m in markers]
+    assert len(set(x_positions)) == 1, f"Expected all markers at same x, got {x_positions}"
+    assert x_positions[0] == 30
+
+    paged = markdown_render.PagedRenderer(fonts, palette, max_text_width=700, margin=30)
+    pages = paged.render(blocks)
+    assert len(pages) >= 1
+    paged_markers = [prim for y, prim in pages[0] if prim[0] == "list_marker"]
+    assert len(paged_markers) == 5
+    paged_x = [m[1] for m in paged_markers]
+    assert len(set(paged_x)) == 1
+    assert paged_x[0] == 30
+
+
+def test_render_markdown_nested_list_indentation():
+    md = "- Parent 1\n  - Child 1.1\n  - Child 1.2\n- Parent 2"
+    blocks = markdown_render.parse_blocks(md)
+    assert len(blocks) == 1
+    assert blocks[0].type == "ul"
+    items = blocks[0].data["items"]
+    assert len(items) == 2
+    assert len(items[0]["children"]) == 2
+    assert len(items[1]["children"]) == 0
+
+    fonts = markdown_render.FontSet.system()
+    palette = markdown_render.DEFAULT_PALETTE
+    renderer = markdown_render.Renderer(fonts, palette, max_text_width=700, margin=30)
+    rendered_items, _, _ = renderer.render(blocks)
+    markers = [prim for y, prim in rendered_items if prim[0] == "list_marker"]
+    assert len(markers) == 4
+    # Parent 1: 30, Child 1.1: 52 (30 + 22), Child 1.2: 52, Parent 2: 30
+    assert markers[0][1] == 30
+    assert markers[1][1] == 52
+    assert markers[2][1] == 52
+    assert markers[3][1] == 30
+
+
+def test_render_markdown_ordered_list_numbers():
+    md = "1. First\n2. Second\n3. Third"
+    blocks = markdown_render.parse_blocks(md)
+    assert len(blocks) == 1
+    assert blocks[0].type == "ol"
+    items = blocks[0].data["items"]
+    assert len(items) == 3
+    assert [it["number"] for it in items] == [1, 2, 3]
+
+    fonts = markdown_render.FontSet.system()
+    palette = markdown_render.DEFAULT_PALETTE
+    renderer = markdown_render.Renderer(fonts, palette, max_text_width=700, margin=30)
+    rendered_items, _, _ = renderer.render(blocks)
+    markers = [prim for y, prim in rendered_items if prim[0] == "list_marker"]
+    assert [m[3] for m in markers] == ["1. ", "2. ", "3. "]
+
+
+
+
+
+

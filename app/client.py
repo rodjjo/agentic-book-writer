@@ -51,9 +51,12 @@ OnEvent = Callable[[dict], None]
 class Client:
     """A thin, tool-aware wrapper over the OpenAI-compatible HTTP protocol."""
 
-    def __init__(self, config: Config, tool_context: Optional[ToolContext] = None):
+    def __init__(self, config: Config, tool_context: Optional[ToolContext] = None,
+                 api_key: Optional[str] = None):
         self.config = config
-        self.transport = make_transport(config.server_spec, config.connection_timeout)
+        self.api_key = api_key or ""
+        self.transport = make_transport(config.server_spec, config.connection_timeout,
+                                        api_key=self.api_key)
         self.tool_ctx = tool_context or ToolContext(BookStore(config.book_root))
         self.messages: list[dict] = []
         # Context messages (e.g. a "current book" system hint) are prepended to every
@@ -63,8 +66,19 @@ class Client:
         self.context_messages: list[dict] = []
         self.model = config.model
         self.last_response: Optional[Response] = None
+        self.current_book_name: Optional[str] = None
+        self.current_book_id: Optional[str] = None
+        self.current_book_instruction: Optional[str] = None
+        if config.system_prompt:
+            self.set_context(self._assemble_system_prompt())
 
     # -- lifecycle --------------------------------------------------------
+    def set_api_key(self, api_key: Optional[str]) -> None:
+        """Set or update the in-memory API key for outgoing requests."""
+        self.api_key = api_key or ""
+        if hasattr(self, "transport") and self.transport is not None:
+            self.transport.api_key = self.api_key
+
     def set_model(self, model: str) -> None:
         self.model = model
 
@@ -72,20 +86,53 @@ class Client:
         """Replace the context messages (prepended to every request)."""
         self.context_messages = [{"role": "system", "content": text}] if text else []
 
-    def set_current_book(self, book_name: Optional[str]) -> None:
-        """Tell the model which book its tool calls should be tied to.
+    def _assemble_system_prompt(self) -> str:
+        parts: list[str] = []
+        global_prompt = (self.config.system_prompt or "").strip()
+        if global_prompt:
+            parts.append(global_prompt)
 
-        Sent as a lightweight system message so it also works with real OpenAI-compatible
-        models (which honour the system prompt) as well as the bundled fake server.
-        """
-        if book_name:
-            self.set_context(
-                f"The user is currently working on the book named \"{book_name}\". "
-                "Any instruction that writes, edits, deletes, lists or searches pages refers "
-                "to this book unless another book is explicitly named."
+        book_instruction = (self.current_book_instruction or "").strip()
+        if book_instruction:
+            parts.append(book_instruction)
+
+        if self.current_book_name:
+            resolved_id = self.current_book_id
+            id_clause = f" with ID \"{resolved_id}\"" if resolved_id else ""
+            id_field = f" (book_id: \"{resolved_id}\")" if resolved_id else ""
+            parts.append(
+                f"The user is currently working on the book named \"{self.current_book_name}\"{id_clause}{id_field}. "
+                "The book is organized into chapters. Any instruction that writes, edits, deletes, lists or searches refers "
+                "to this book unless another book is explicitly named. When calling chapter tools (write_chapter, edit_chapter, "
+                f"read_chapter, delete_chapter, list_chapters, get_book_info), pass book_id=\"{resolved_id or ''}\" and the 1-based "
+                "chapter_number. Use 'get_book_info' to discover chapter numbers, titles, and book metadata."
             )
-        else:
-            self.set_context("")
+
+        return "\n\n".join(parts)
+
+    def set_current_book(self, book_name: Optional[str], book_id: Optional[str] = None,
+                         custom_instruction: Optional[str] = None) -> None:
+        """Tell the model which book its tool calls should be tied to and apply its instructions."""
+        self.current_book_name = book_name or None
+        self.current_book_id = book_id or None
+        self.current_book_instruction = custom_instruction
+
+        if self.current_book_name:
+            if getattr(self, "tool_ctx", None) and getattr(self.tool_ctx, "store", None):
+                book = self.tool_ctx.store.get_book(self.current_book_name)
+                if book:
+                    if not self.current_book_id:
+                        self.current_book_id = book.id
+                    if self.current_book_instruction is None:
+                        self.current_book_instruction = book.custom_instruction
+
+        prompt = self._assemble_system_prompt()
+        self.set_context(prompt)
+
+    def update_system_prompt(self, system_prompt: str) -> None:
+        """Update global system prompt and rebuild context messages."""
+        self.config.system_prompt = system_prompt or ""
+        self.set_context(self._assemble_system_prompt())
 
     def clear(self) -> None:
         """Start a fresh conversation, keeping the books untouched."""

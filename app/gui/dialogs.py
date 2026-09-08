@@ -23,6 +23,7 @@ from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import Image as KivyImage
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 
@@ -149,23 +150,29 @@ def _field_input(theme, text: str = "", password: bool = False) -> TextInput:
 # ---------------------------------------------------------------------------
 
 class SettingsDialog:
-    """Edit connection, model and book settings. Result dict mirrors the form."""
+    """Edit connection, model, system prompt, and per-book custom instructions."""
 
     def __init__(self, theme, initial: dict, on_done: OnDone):
         self._on_done = on_done
         self.settings = dict(initial)
-        self.popup = _mk_popup(580, 470, theme=theme)
-        body = BoxLayout(orientation="vertical", padding=(20, 16), spacing=12)
+        self.popup = _mk_popup(640, 520, theme=theme)
+        body = BoxLayout(orientation="vertical", padding=(20, 14), spacing=10)
         body.add_widget(make_label("Settings", font_size=17, bold=True,
-                                   color=rgba(theme.fg)))
-        hint = note_label("Connection, model and books-folder configuration for this session.",
-                          color=rgba(theme.muted))
+                                   color=rgba(theme.fg), size_hint=(1.0, None), height=24))
+        hint = note_label("Connection, model, system prompt and book custom instructions.",
+                          color=rgba(theme.muted), size_hint=(1.0, None), height=18)
         body.add_widget(hint)
 
-        # Form rows: fixed height so the text fields, spinner and labels line up
-        # and nothing gets squashed to a fraction of its intended size.
-        grid = GridLayout(cols=2, spacing=(16, 10), size_hint=(1.0, None),
-                          row_default_height=40, row_force_default=True)
+        # Scrollable container for all settings sections
+        scroller = ScrollView(do_scroll_x=False, do_scroll_y=True, bar_width=6,
+                              size_hint=(1.0, 1.0))
+        content_box = BoxLayout(orientation="vertical", spacing=14, size_hint=(1.0, None),
+                                padding=(0, 4, 10, 4))
+        content_box.bind(minimum_height=content_box.setter("height"))
+
+        # Form rows for connection / model / theme
+        grid = GridLayout(cols=2, spacing=(16, 8), size_hint=(1.0, None),
+                          row_default_height=36, row_force_default=True)
         grid.bind(minimum_height=grid.setter("height"))
         self._fields: dict[str, TextInput] = {}
 
@@ -192,7 +199,7 @@ class SettingsDialog:
         add_row("connection_timeout", "Timeout (s)",
                 str(self.settings.get("connection_timeout", "")))
 
-        # theme selector (same height as the text-field rows above)
+        # theme selector
         grid.add_widget(_form_label("Theme"))
         self._theme_spinner = Spinner(
             text=str(self.settings.get("theme", "light")),
@@ -202,7 +209,34 @@ class SettingsDialog:
             background_normal="",
         )
         grid.add_widget(self._theme_spinner)
-        body.add_widget(grid)
+        content_box.add_widget(grid)
+
+        # -- Global System Prompt Section --
+        sys_box = BoxLayout(orientation="vertical", spacing=4, size_hint=(1.0, None))
+        sys_box.bind(minimum_height=sys_box.setter("height"))
+        sys_box.add_widget(make_label("System Prompt (Global)", font_size=14, bold=True,
+                                      color=rgba(theme.fg), size_hint=(1.0, None), height=20))
+        sys_box.add_widget(note_label("Instructions sent to the AI assistant for all conversations.",
+                                      color=rgba(theme.muted), size_hint=(1.0, None), height=18))
+        self._system_prompt_input = TextInput(
+            text=str(self.settings.get("system_prompt", "")),
+            multiline=True,
+            size_hint=(1.0, None),
+            height=120,
+            font_name=font_file(),
+            font_size=13,
+            background_color=rgba(theme.input_bg),
+            foreground_color=rgba(theme.fg),
+            hint_text="Enter global system prompt...",
+            hint_text_color=rgba(theme.muted),
+            cursor_color=rgba(theme.accent),
+            padding=(10, 8),
+        )
+        sys_box.add_widget(self._system_prompt_input)
+        content_box.add_widget(sys_box)
+
+        scroller.add_widget(content_box)
+        body.add_widget(scroller)
 
         row, ok, cancel = _button_row(theme)
         ok.bind(on_release=lambda *_a: self._confirm())
@@ -218,9 +252,69 @@ class SettingsDialog:
         for key, inp in self._fields.items():
             self.settings[key] = inp.text.strip()
         self.settings["theme"] = self._theme_spinner.text
+        self.settings["system_prompt"] = self._system_prompt_input.text.strip()
         self._close(self.settings)
 
     def _close(self, result: Optional[dict]) -> None:
+        self.popup.dismiss()
+        if self._on_done is not None:
+            self._on_done(result)
+
+
+# ---------------------------------------------------------------------------
+# Book instructions dialog
+# ---------------------------------------------------------------------------
+
+class BookInstructionsDialog:
+    """Modal dialog to view and edit custom instructions for a specific book."""
+
+    def __init__(self, theme, book_name: str, current_instruction: str,
+                 on_done: Callable[[Optional[str]], None]):
+        self._on_done = on_done
+        self.book_name = book_name
+        popup = _mk_popup(560, 360, theme=theme)
+        body = BoxLayout(orientation="vertical", padding=(18, 16), spacing=10)
+
+        head = BoxLayout(orientation="vertical", spacing=4, size_hint=(1.0, None))
+        head.bind(minimum_height=head.setter("height"))
+        head.add_widget(make_label(f"Instructions: {book_name}", font_size=16, bold=True,
+                                   color=rgba(theme.fg), size_hint=(1.0, None), height=24))
+        head.add_widget(note_label(
+            "Instructions concatenated to the system prompt when working on this book.",
+            color=rgba(theme.muted), size_hint=(1.0, None), height=18))
+        body.add_widget(head)
+
+        self._input = TextInput(
+            text=current_instruction or "",
+            multiline=True,
+            size_hint=(1.0, 1.0),
+            font_name=font_file(),
+            font_size=13,
+            background_color=rgba(theme.input_bg),
+            foreground_color=rgba(theme.fg),
+            hint_text="Enter custom instructions for this book (tone, style, world lore, constraints)...",
+            hint_text_color=rgba(theme.muted),
+            cursor_color=rgba(theme.accent),
+            padding=(10, 8),
+        )
+        body.add_widget(self._input)
+
+        row, ok, cancel = _button_row(theme)
+        ok.text = "Save"
+        ok.bind(on_release=lambda *_a: self._save())
+        cancel.bind(on_release=lambda *_a: self._close(None))
+        body.add_widget(row)
+
+        popup.content = body
+        self.popup = popup
+
+    def open(self) -> None:
+        self.popup.open()
+
+    def _save(self) -> None:
+        self._close(self._input.text.strip())
+
+    def _close(self, result: Optional[str]) -> None:
         self.popup.dismiss()
         if self._on_done is not None:
             self._on_done(result)
@@ -232,7 +326,7 @@ class SettingsDialog:
 
 class ConfirmDialog:
     def __init__(self, theme, title: str, message: str, on_done: Callable[[bool], None],
-                 danger: bool = False):
+                 danger: bool = False, ok_text: str = "OK", cancel_text: str = "Cancel"):
         self._on_done = on_done
         popup = _mk_popup(460, 220, theme=theme)
         body = BoxLayout(orientation="vertical", padding=(18, 16), spacing=8)
@@ -242,6 +336,8 @@ class ConfirmDialog:
         msg.bind(texture_size=lambda _l, ts: setattr(msg, "height", ts[1]))
         body.add_widget(msg)
         row, ok, cancel = _button_row(theme)
+        ok.text = ok_text
+        cancel.text = cancel_text
         ok.bg_color = rgba("#dc2626") if danger else rgba(theme.accent)
         ok.bind(on_release=lambda *_a: self._done(True))
         cancel.bind(on_release=lambda *_a: self._done(False))
@@ -286,6 +382,56 @@ class InfoDialog:
         self.popup.dismiss()
         if self._on_done is not None:
             self._on_done()
+
+
+class GoToPageDialog:
+    """Prompt the user for a 1-based page number to jump to."""
+
+    def __init__(self, theme, current_page: int, total_pages: int,
+                 on_done: Callable[[Optional[int]], None]):
+        self._on_done = on_done
+        self.total_pages = max(1, total_pages)
+        popup = _mk_popup(420, 210, theme=theme)
+        body = BoxLayout(orientation="vertical", padding=(18, 16), spacing=10)
+        body.add_widget(make_label("Go to Page", font_size=16, bold=True, color=rgba(theme.fg)))
+
+        hint = note_label(f"Enter page number (1 - {self.total_pages}):", color=rgba(theme.muted))
+        body.add_widget(hint)
+
+        self.input = _field_input(theme, text=str(current_page))
+        self.input.size_hint = (1.0, None)
+        self.input.height = 36
+        body.add_widget(self.input)
+
+        row, ok, cancel = _button_row(theme)
+        ok.text = "Go"
+        ok.bind(on_release=lambda *_a: self._submit())
+        cancel.bind(on_release=lambda *_a: self._close(None))
+        self.input.bind(on_text_validate=lambda *_a: self._submit())
+        body.add_widget(row)
+
+        popup.content = body
+        self.popup = popup
+        Clock.schedule_once(lambda _dt: setattr(self.input, "focus", True), 0.1)
+
+    def open(self) -> None:
+        self.popup.open()
+
+    def _submit(self) -> None:
+        val = self.input.text.strip()
+        try:
+            num = int(val)
+            if 1 <= num <= self.total_pages:
+                self._close(num)
+                return
+        except ValueError:
+            pass
+        self._close(None)
+
+    def _close(self, result: Optional[int]) -> None:
+        self.popup.dismiss()
+        if self._on_done is not None:
+            self._on_done(result)
 
 
 # ---------------------------------------------------------------------------
