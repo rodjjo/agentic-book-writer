@@ -12,6 +12,8 @@ never stores books or chapters; it only decides *what* to do. The actual file wo
 remove books, write / edit / delete / search **chapters**) is performed by **the application**
 through tool calls, tied to the book you currently have selected.
 
+![Book Writer application screenshot](docs/screen.png)
+
 ```
  ┌────────────────────┐   HTTP  (/v1/chat/completions, SSE)    ┌─────────────────────┐
  │  Book Writer (Kivy)│  ──────── or ────────────────────────▶ │ OpenAI-compatible   │
