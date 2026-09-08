@@ -8,6 +8,9 @@ Run with either::
 
 The CLI only chooses *where to connect*, *how the app looks* and whether to connect
 automatically; everything else is configured at runtime (settings dialog) or in the window.
+Settings changed in the GUI are remembered in ``~/.agentic-book-writer/config.json`` and
+restored on the next start: the persisted settings are loaded first, then any explicit
+command-line flags override them for that run.
 """
 
 from __future__ import annotations
@@ -16,16 +19,23 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Optional
 
-from .config import Config, Theme as ConfigTheme, default_config
+from .config import (Config, ConfigError, Theme as ConfigTheme,
+                     default_config, default_config_path, load_config)
 from .theme import THEMES
 
 _GEOMETRY_RE = re.compile(r"^\s*(\d+)x(\d+)([+-]\d+)?([+-]\d+)?\s*$")
 
 
-def build_config(args: argparse.Namespace) -> Config:
-    cfg = default_config()
+def build_config(args: argparse.Namespace, base: Optional[Config] = None) -> Config:
+    """Apply the command-line flags to ``base`` (defaults when ``base`` is None).
+
+    Only flags that were actually given on the command line override the base, so
+    callers can layer the CLI over previously-persisted settings.
+    """
+    cfg = default_config() if base is None else base
     if args.server:
         cfg.server_address = args.server
     if args.model:
@@ -39,6 +49,28 @@ def build_config(args: argparse.Namespace) -> Config:
     if args.system_prompt:
         cfg.system_prompt = args.system_prompt
     return cfg
+
+
+def startup_config(args: argparse.Namespace,
+                   config_path: Optional[Path | str] = None) -> Config:
+    """The effective config for a GUI run.
+
+    Starts from the persisted settings file (``~/.agentic-book-writer/config.json`` by
+    default, or ``config_path`` when given), falls back to built-in defaults when no
+    settings file exists, then lets explicit CLI flags in ``args`` override either.
+    A corrupt settings file is reported on stderr and ignored.
+    """
+    cfg = default_config()
+    try:
+        saved = load_config(config_path)
+    except ConfigError as exc:
+        where = Path(config_path) if config_path is not None else default_config_path()
+        print(f"warning: ignoring invalid settings file {where}: {exc}",
+              file=sys.stderr)
+    else:
+        if saved is not None:
+            cfg = saved
+    return build_config(args, cfg)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,7 +125,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     KivyConfig.set("kivy", "exit_on_escape", "0")
 
     args = build_parser().parse_args(argv)
-    config = build_config(args)
+    config = startup_config(args)
     _apply_window_geometry(args.geometry)
 
     # Import the App lazily: importing kivy.uix is only needed for a display session,

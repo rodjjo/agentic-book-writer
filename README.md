@@ -70,6 +70,10 @@ through tool calls, tied to the book you currently have selected.
   and theme / settings / status. It never scrolls or drags; content absorbs window resizes.
 - **Global system prompt**: set custom instructions for the assistant in Settings; they are
   prepended to every request (alongside the selected book's context/instructions).
+- **Settings are remembered**: server address, model, books folder, theme, timeout and system
+  prompt are saved to `~/.agentic-book-writer/config.json` whenever you change them (Settings
+  dialog, Theme button, model / server dropdowns, folder picker) and restored on the next
+  launch. Explicit command-line flags still override the saved values for that run.
 - **Per-book custom instructions**: a book can carry its own instructions, applied automatically
   when you select it as the active book.
 - **Modal dialogs only** for everything except the main window (settings, book instructions,
@@ -163,6 +167,11 @@ python tools/run_gui.py --server unix:/tmp/book_writer.sock
 
 Optional GUI flags: `--model`, `--book-root`, `--theme`, `--geometry`, `--timeout`,
 `--system-prompt`, `--autoconnect` (see `python -m app --help`).
+
+On every launch the client first restores the settings saved in
+`~/.agentic-book-writer/config.json`, then any explicit command-line flag above overrides
+the matching setting for that run (e.g. `make run` always connects to the bundled socket).
+Delete the file to forget everything and go back to defaults.
 
 ### Trying it out
 

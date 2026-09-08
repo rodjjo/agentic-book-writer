@@ -5,6 +5,10 @@ configuration, the client, the book store and the whole widget tree (control bar
 Conversation / Books / Logs tabs in the middle, instruction compose bar at the bottom)
 and drives the network work from background threads while every UI mutation is marshalled
 through a thread-safe queue drained on Kivy's main thread via ``Clock``.
+
+User settings (server address, model, books folder, theme, timeout, system prompt) are
+persisted to ``~/.agentic-book-writer/config.json`` whenever the user changes them, so
+the next launch restores them (see :meth:`BookWriterApp._save_settings`).
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import queue
 import re
 import threading
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from kivy.app import App
@@ -24,7 +29,7 @@ from kivy.uix.spinner import Spinner
 from .. import logs as app_logs
 from ..books_store import BookStore
 from ..client import Client
-from ..config import Config, Theme as ConfigTheme
+from ..config import Config, Theme as ConfigTheme, default_config_path, save_config
 from ..theme import THEMES
 from ..tools import ToolContext
 from .books_panel import BooksPanel
@@ -46,12 +51,18 @@ TAB_LABELS = {"chat": "Conversation", "books": "Books", "logs": "Logs"}
 class BookWriterApp(App):
     """Kivy application: controller for the whole Book Writer GUI."""
 
-    def __init__(self, config: Config, autoconnect: bool = False, **kwargs):
+    def __init__(self, config: Config, autoconnect: bool = False,
+                 settings_path: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.cfg = config
         self.title = "Book Writer"
         self.autoconnect = autoconnect
         self.theme = THEMES[config.theme.value]
+
+        # Where the user settings are persisted (JSON). Defaults to the standard
+        # ~/.agentic-book-writer/config.json location; a path is injected in tests.
+        self.settings_path = (Path(settings_path).expanduser()
+                              if settings_path else default_config_path())
 
         # persistent state shared across theme rebuilds
         self.book_store = BookStore(config.book_root)
@@ -415,12 +426,27 @@ class BookWriterApp(App):
     # ------------------------------------------------------------------
     # Theme / settings
     # ------------------------------------------------------------------
+    def _save_settings(self) -> None:
+        """Persist the current settings to the JSON settings file.
+
+        Called whenever the user changes a setting (Settings dialog, theme toggle,
+        model selection, server address, books folder).  Failures are logged, never
+        allowed to break the GUI.
+        """
+        try:
+            save_config(self.cfg, self.settings_path)
+            app_logs.get_logger("settings").debug("settings saved to %s", self.settings_path)
+        except Exception as exc:
+            app_logs.get_logger("settings").error(
+                "failed to save settings to %s: %s", self.settings_path, exc)
+
     def toggle_theme(self) -> None:
         if self._busy:
             return
         new_name = "dark" if self.theme.name == "light" else "light"
         self.cfg.theme = ConfigTheme(new_name)
         self.theme = THEMES[new_name]
+        self._save_settings()
         self._rebuild_ui()
         app_logs.get_logger("settings").info("theme set to %s", new_name)
 
@@ -504,6 +530,7 @@ class BookWriterApp(App):
             changed_theme = True
         if hasattr(self, "control_bar"):
             self.control_bar.set_server_address(self.cfg.server_address)
+        self._save_settings()
         if changed_theme:
             self._rebuild_ui()
         else:
@@ -532,6 +559,7 @@ class BookWriterApp(App):
             if address and address != self.cfg.server_address:
                 self.cfg.update_server_address(address)
                 self._recreate_client()
+                self._save_settings()
         except Exception as exc:
             self._busy = False
             self.control_bar.set_busy(False)
@@ -608,6 +636,7 @@ class BookWriterApp(App):
         )
         self.books.set_store(self.book_store)
         self.books.select_book(self.current_book or "")
+        self._save_settings()
         app_logs.get_logger("books").info("books folder -> %s", path)
 
     def on_book_selected(self, name: Optional[str]) -> None:
@@ -833,9 +862,12 @@ class BookWriterApp(App):
             models = data or []
             self._connected = True
             self.control_bar.set_connected(True)
+            previous_model = self.cfg.model
             self.control_bar.update_models(models or [self.cfg.model])
             self.cfg.model = self.control_bar.get_model() or self.cfg.model
             self.client.set_model(self.cfg.model)
+            if self.cfg.model != previous_model:
+                self._save_settings()
             self.control_bar.set_status("connected")
             app_logs.get_logger("conn").info("connected - models: %s",
                                              ", ".join(models) if models else "none")
@@ -859,9 +891,12 @@ class BookWriterApp(App):
     # Misc
     # ------------------------------------------------------------------
     def on_model_selected(self, model: str) -> None:
-        if model and model != "model":
+        # Ignore re-selection of the current model: it is already active, and a
+        # no-op spinner sync at startup must not rewrite the settings file.
+        if model and model != "model" and model != self.cfg.model:
             self.cfg.model = model
             self.client.set_model(model)
+            self._save_settings()
             app_logs.get_logger("conn").info("model selected: %s", model)
 
     def show_image(self, path: str) -> None:

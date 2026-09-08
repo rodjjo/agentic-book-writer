@@ -159,7 +159,8 @@ class SettingsDialog:
         body = BoxLayout(orientation="vertical", padding=(20, 14), spacing=10)
         body.add_widget(make_label("Settings", font_size=17, bold=True,
                                    color=rgba(theme.fg), size_hint=(1.0, None), height=24))
-        hint = note_label("Connection, model, system prompt and book custom instructions.",
+        hint = note_label("Changes are remembered for the next launch "
+                          "(~/.agentic-book-writer/config.json).",
                           color=rgba(theme.muted), size_hint=(1.0, None), height=18)
         body.add_widget(hint)
 

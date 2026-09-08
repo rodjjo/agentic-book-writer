@@ -78,7 +78,10 @@ def test_gui_types_an_instruction_and_creates_a_book(tmp_path):
     server = FakeServerProcess(sock)
     gui = None
     try:
-        env = {**os.environ, "KIVY_NO_FILELOG": "1", "DISPLAY": DISPLAY}
+        # A private HOME keeps the app's settings file (~/.agentic-book-writer/config.json)
+        # and Kivy's own ~/.kivy state inside the pytest tmp dir.
+        env = {**os.environ, "KIVY_NO_FILELOG": "1", "DISPLAY": DISPLAY,
+               "HOME": str(tmp_path)}
         gui = subprocess.Popen(
             [PYTHON, "-m", "app", "--server", f"unix:{sock}",
              "--book-root", str(book_root), "--model", "book-writer-agent",

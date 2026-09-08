@@ -141,6 +141,10 @@ class ControlBar(BoxLayout):
         self.add_widget(row3)
 
         self.set_server_address(app.cfg.server_address)
+        # Show the configured (persisted) model instead of the "model" placeholder;
+        # harmless if the server later reports a different list on connect.
+        if app.cfg.model:
+            self.set_model(app.cfg.model)
 
     # -- events ------------------------------------------------------------
     def _toggle_key_visibility(self) -> None:

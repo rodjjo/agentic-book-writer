@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.books_store import BookStore
-from app.config import Config
+from app.config import Config, load_config
 from app.gui.application import BookWriterApp
 from app.gui.dialogs import BookInstructionsDialog, SettingsDialog
 from app.theme import THEMES
@@ -84,7 +84,7 @@ def test_application_apply_settings(tmp_path):
     store.create_book("Fantasy Book", custom_instruction="High fantasy.")
 
     cfg = Config(book_root=str(root), system_prompt="Original prompt")
-    app = BookWriterApp(cfg)
+    app = BookWriterApp(cfg, settings_path=str(tmp_path / "config.json"))
     app.current_book = "SciFi Book"
     app.client.set_current_book("SciFi Book")
 
@@ -110,6 +110,11 @@ def test_application_apply_settings(tmp_path):
     app._apply_settings(new_settings)
 
     assert app.cfg.system_prompt == "Revised universal prompt"
+    # Applying settings writes them to the settings file immediately.
+    persisted = load_config(tmp_path / "config.json")
+    assert persisted is not None
+    assert persisted.system_prompt == "Revised universal prompt"
+    assert persisted.theme.value == "light"
     # Check persistence in store
     reloaded_scifi = store.get_book("SciFi Book")
     assert reloaded_scifi.custom_instruction == "Cyberpunk and neon themes."
@@ -122,6 +127,80 @@ def test_application_apply_settings(tmp_path):
     assert "Cyberpunk and neon themes." in updated_ctx
     assert "Original prompt" not in updated_ctx
     assert "Hard sci-fi only." not in updated_ctx
+
+
+def test_application_saves_settings_on_model_change(tmp_path):
+    cfg = Config(book_root=str(tmp_path / "books"))
+    app = BookWriterApp(cfg, settings_path=str(tmp_path / "config.json"))
+    assert load_config(tmp_path / "config.json") is None  # nothing saved yet
+
+    app.on_model_selected("better-model")
+    assert app.cfg.model == "better-model"
+    persisted = load_config(tmp_path / "config.json")
+    assert persisted is not None
+    assert persisted.model == "better-model"
+    assert persisted.book_root == str(tmp_path / "books")
+
+
+def test_application_re_selecting_current_model_does_not_rewrite_settings(tmp_path):
+    cfg = Config(book_root=str(tmp_path / "books"), model="book-writer-agent")
+    app = BookWriterApp(cfg, settings_path=str(tmp_path / "config.json"))
+
+    # The spinner initialising to the current (persisted) model must not touch disk.
+    app.on_model_selected(cfg.model)
+    assert load_config(tmp_path / "config.json") is None
+
+
+def test_application_theme_toggle_persists(tmp_path, monkeypatch):
+    from app.config import Theme as ConfigTheme
+    from app.theme import THEMES
+
+    cfg = Config(book_root=str(tmp_path / "books"), theme=ConfigTheme.LIGHT)
+    app = BookWriterApp(cfg, settings_path=str(tmp_path / "config.json"))
+    # Headless tests never run the Kivy event loop, so a real theme change would
+    # try to rebuild a window that does not exist; stub the rebuild out.
+    monkeypatch.setattr(app, "_rebuild_ui", lambda: None)
+
+    app.toggle_theme()
+
+    assert app.cfg.theme is ConfigTheme.DARK
+    assert app.theme is THEMES["dark"]
+    persisted = load_config(tmp_path / "config.json")
+    assert persisted is not None
+    assert persisted.theme is ConfigTheme.DARK
+
+
+def test_application_book_root_change_persists(tmp_path):
+    cfg = Config(book_root=str(tmp_path / "first"))
+    app = BookWriterApp(cfg, settings_path=str(tmp_path / "config.json"))
+    app._build_gui()
+
+    second = tmp_path / "second"
+    new_settings = {
+        "server_address": cfg.server_address,
+        "book_root": str(second),
+        "model": cfg.model,
+        "connection_timeout": "30",
+        "theme": "light",
+        "system_prompt": "",
+    }
+    app._apply_settings(new_settings)
+
+    assert str(app.book_store.root) == str(second)
+    persisted = load_config(tmp_path / "config.json")
+    assert persisted is not None
+    assert persisted.book_root == str(second)
+
+
+def test_application_uses_settings_file_under_dot_dir_by_default(tmp_path, monkeypatch):
+    import app.config as config_module
+
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(config_module.Path, "home",
+                        staticmethod(lambda: fake_home))
+    cfg = Config(book_root=str(tmp_path / "books"))
+    app = BookWriterApp(cfg)
+    assert app.settings_path == fake_home / ".agentic-book-writer" / "config.json"
 
 
 def test_control_bar_api_key(tmp_path):
